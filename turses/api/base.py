@@ -281,11 +281,9 @@ class AsyncApi(ApiAdapter):
         self._api = api_cls(access_token_key=self._access_token_key,
                             access_token_secret=self._access_token_secret,)
 
-    @wrap_exceptions
     def init_api(self):
         self._api.init_api()
         self.is_authenticated = True
-        self.user = self.verify_credentials()
 
     def verify_credentials(self):
         return self._api.verify_credentials()

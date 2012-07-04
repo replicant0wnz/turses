@@ -49,7 +49,7 @@ def merge_dicts(*args):
 
 class KeyHandler(object):
     """
-    Maps key bindings from configuration to calls to :class:`Controller` 
+    Maps key bindings from configuration to calls to :class:`Controller`
     functions.
     """
 
@@ -156,6 +156,7 @@ class KeyHandler(object):
         Return the command name that corresponds to `key` (if any).
         """
         for command_name in self.configuration.key_bindings:
+            # TODO: optimize with `in` operator
             bound_key, _ = self.configuration.key_bindings[command_name]
             if key == bound_key:
                 return command_name
@@ -260,6 +261,7 @@ class Controller(Observer):
         # Model
         self.timelines = TimelineList()
         self.timelines.subscribe(self)
+        self.are_timelines_initialized = False
 
         # Mode
         self.mode = self.INFO_MODE
@@ -276,30 +278,29 @@ class Controller(Observer):
 
     def authenticate_api(self):
         self.info_message(_('Authenticating API'))
+        logging.info('Authenticating API')
 
-        self.api.init_api(on_error=self.api_init_error,
-                          on_success=self.init_timelines,)
+        self.api.init_api()
+        try:
+            # fetch the authenticated user
+            self.user = self.api.verify_credentials()
+        except TweepError, message:
+            logging.debug('Failed to authenticate API')
+            logging.exception(message)
+            self.api.is_authenticated = False
+            self.error_message('Failed to authenticate API')
+        else:
+            logging.debug('API successfully authenticated')
+            if not self.are_timelines_initialized:
+                self.init_timelines()
 
     @async
     def init_timelines(self):
-        # API has to be authenticated
-        while (not self.api.is_authenticated):
-            pass
-
-        # fetch the authenticated user
-        self.user = self.api.verify_credentials()
-
-        # initialize the timelines
+        """Fetch the default timelines."""
         self.info_message(_('Initializing timelines'))
         self.append_default_timelines()
-
-        # Main loop has to be running
-        while not getattr(self, 'loop'):
-            pass
-
-        # update alarm
-        seconds = self.configuration.update_frequency
-        self.loop.set_alarm_in(seconds, self.update_alarm)
+        self.are_timelines_initialized = True
+        self.set_update_alarm()
 
     def main_loop(self):
         """
@@ -317,6 +318,15 @@ class Controller(Observer):
             # Authenticate API just before starting main loop
             self.authenticate_api()
 
+            if self.api.is_authenticated:
+                self.init_timelines()
+
+
+        if self.api.is_authenticated:
+            self.user = self.api.verify_credentials()
+        else:
+            self.set_authenticate_alarm()
+
         try:
             self.loop.run()
         except TweepError, message:
@@ -327,6 +337,7 @@ class Controller(Observer):
 
     def exit(self):
         """Exit the program."""
+        logging.info('Program exited')
         raise urwid.ExitMainLoop()
 
     # -- Observer -------------------------------------------------------------
@@ -335,20 +346,44 @@ class Controller(Observer):
         """
         From :class:`~turses.meta.Observer`, gets called when the observed
         subjects change.
+
+        :class:`Controller` is observing :attr:`timelines`.
         """
         self.draw_timelines()
 
-    # -- Callbacks ------------------------------------------------------------
-
-    def api_init_error(self):
-        # TODO retry
-        self.error_message(_('Couldn\'t initialize API'))
+    # -- Alarms ---------------------------------------------------------------
 
     def update_alarm(self, *args, **kwargs):
+        """Updates all timelines and schedules the next update."""
         self.update_all_timelines()
+        self.set_update_alarm()
 
+    def authenticate_api_alarm(self, *args, **kwargs):
+        self.authenticate_api()
+        if not self.api.is_authenticated:
+            self.set_authenticate_alarm()
+
+    def set_update_alarm(self):
+        """Set the periodic alarm that updates all timelines."""
         seconds = self.configuration.update_frequency
-        self.loop.set_alarm_in(seconds, self.update_alarm)
+        self.set_alarm(seconds, self.update_alarm)
+
+    def set_authenticate_alarm(self):
+        """Set the periodic alarm that tries an API authentication."""
+        seconds = self.configuration.api_auth_retry_frequency
+        message = _('Retrying API authentication in %s seconds' % seconds) 
+        self.info_message(message)
+        logging.info(message)
+        self.set_alarm(seconds, self.authenticate_api_alarm)
+
+    def set_alarm(self, seconds, function):
+        """
+        Call `function` within `seconds` seconds.
+
+        It dependes on the main loop running for taking effect.
+        """
+        if hasattr(self, 'loop'):
+            self.loop.set_alarm_in(seconds, function)
 
     # -- Modes ----------------------------------------------------------------
 
@@ -449,7 +484,7 @@ class Controller(Observer):
         ]
 
         default_timelines = self.configuration.default_timelines
-        is_any_default_timeline = any([default_timelines[timeline] for timeline 
+        is_any_default_timeline = any([default_timelines[timeline] for timeline
                                                                    in timelines])
 
         if is_any_default_timeline:
@@ -767,8 +802,8 @@ class Controller(Observer):
         if hasattr(self, "loop"):
             try:
                 self.loop.draw_screen()
-            except AssertionError, message:
-                logging.critical(message)
+            except AssertionError:
+                logging.critical('Failed to redraw screen')
 
     # -- Editor ---------------------------------------------------------------
 

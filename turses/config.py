@@ -360,6 +360,7 @@ LOGGING_LEVEL = 3
 # Twitter
 
 UPDATE_FREQUENCY = 300
+API_AUTH_RETRY_FREQUENCY = 10
 
 # Environment
 
@@ -465,6 +466,7 @@ class Configuration(object):
         """Load default values into configuration."""
         self.default_timelines = DEFAULT_TIMELINES
         self.update_frequency = UPDATE_FREQUENCY
+        self.api_auth_retry_frequency = API_AUTH_RETRY_FREQUENCY
         self.key_bindings = KEY_BINDINGS
         self.palette = PALETTE
         self.styles = STYLES
