@@ -318,10 +318,6 @@ class Controller(Observer):
             # Authenticate API just before starting main loop
             self.authenticate_api()
 
-            if self.api.is_authenticated:
-                self.init_timelines()
-
-
         if self.api.is_authenticated:
             self.user = self.api.verify_credentials()
         else:
