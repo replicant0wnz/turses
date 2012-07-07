@@ -144,7 +144,7 @@ def main():
                     ui=curses_interface,
                     api_backend=api_backend)
     try:
-        turses.start()
+        turses.main_loop()
     except KeyboardInterrupt:
         pass
     except:

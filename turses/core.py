@@ -7,9 +7,9 @@ This module contains the controller and key handling logic of turses.
 import logging
 from gettext import gettext as _
 from functools import partial, wraps
+from twisted.internet import reactor
 
 import urwid
-from tweepy import TweepError
 
 from turses.utils import (
         get_urls,
@@ -49,7 +49,7 @@ def merge_dicts(*args):
 
 class KeyHandler(object):
     """
-    Maps key bindings from configuration to calls to :class:`Controller` 
+    Maps key bindings from configuration to calls to :class:`Controller`
     functions.
     """
 
@@ -271,8 +271,24 @@ class Controller(Observer):
                             access_token_key=oauth_token,
                             access_token_secret=oauth_token_secret,)
 
-    def start(self):
-        self.main_loop()
+    def main_loop(self):
+        """
+        Launch the main loop of the program.
+        """
+        # Creating the main loop for the first time
+        self.key_handler = KeyHandler(self.configuration, self)
+        handler = self.key_handler.handle
+
+        # Authenticate API when the reactor starts running
+        reactor.callWhenRunning(self.authenticate_api)
+        self.loop = urwid.MainLoop(self.ui,
+                                   self.configuration.palette,
+                                   handle_mouse=False,
+                                   unhandled_input=handler,
+                                   event_loop=urwid.TwistedEventLoop(reactor))
+
+        self.loop.run()
+
 
     def authenticate_api(self):
         self.info_message(_('Authenticating API'))
@@ -300,30 +316,6 @@ class Controller(Observer):
         # update alarm
         seconds = self.configuration.update_frequency
         self.loop.set_alarm_in(seconds, self.update_alarm)
-
-    def main_loop(self):
-        """
-        Launch the main loop of the program.
-        """
-        if not hasattr(self, 'loop'):
-            # Creating the main loop for the first time
-            self.key_handler = KeyHandler(self.configuration, self)
-            handler = self.key_handler.handle
-            self.loop = urwid.MainLoop(self.ui,
-                                       self.configuration.palette,
-                                       handle_mouse=False,
-                                       unhandled_input=handler)
-
-            # Authenticate API just before starting main loop
-            self.authenticate_api()
-
-        try:
-            self.loop.run()
-        except TweepError, message:
-            logging.exception(message)
-            self.error_message(_('API error: %s' % message))
-            # recover from API errors
-            self.main_loop()
 
     def exit(self):
         """Exit the program."""
@@ -435,9 +427,6 @@ class Controller(Observer):
         timeline.update()
         timeline.activate_first()
         self.timelines.append_timeline(timeline)
-        if self.is_in_info_mode():
-            #self.timeline_mode()
-            pass
 
     @async
     def append_default_timelines(self):
@@ -450,7 +439,7 @@ class Controller(Observer):
         ]
 
         default_timelines = self.configuration.default_timelines
-        is_any_default_timeline = any([default_timelines[timeline] for timeline 
+        is_any_default_timeline = any([default_timelines[timeline] for timeline
                                                                    in timelines])
 
         if is_any_default_timeline:
