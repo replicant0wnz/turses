@@ -8,13 +8,11 @@ import logging
 from gettext import gettext as _
 from functools import partial, wraps
 from twisted.internet import reactor
+import webbrowser
 
 import urwid
 
-from turses.utils import (
-        get_urls,
-        spawn_process,
-)
+from turses.utils import get_urls
 from turses.meta import async, wrap_exceptions, Observer
 from turses.config import (
         HOME_TIMELINE,
@@ -22,10 +20,12 @@ from turses.config import (
         FAVORITES_TIMELINE,
         MESSAGES_TIMELINE,
         OWN_TWEETS_TIMELINE,
+
+        configuration,
 )
+from turses.utils import is_username
 from turses.models import (
         is_DM,
-        is_username,
         is_valid_status_text,
         is_valid_search_text,
         sanitize_username,
@@ -53,10 +53,7 @@ class KeyHandler(object):
     functions.
     """
 
-    def __init__(self,
-                 configuration,
-                 controller):
-        self.configuration = configuration
+    def __init__(self, controller):
         self.controller = controller
 
         self.TURSES_COMMANDS = {
@@ -155,8 +152,8 @@ class KeyHandler(object):
         """
         Return the command name that corresponds to `key` (if any).
         """
-        for command_name in self.configuration.key_bindings:
-            bound_key, _ = self.configuration.key_bindings[command_name]
+        for command_name in configuration.key_bindings:
+            bound_key, _ = configuration.key_bindings[command_name]
             if key == bound_key:
                 return command_name
 
@@ -252,8 +249,7 @@ class Controller(Observer):
 
     # -- Initialization -------------------------------------------------------
 
-    def __init__(self, configuration, ui, api_backend):
-        self.configuration = configuration
+    def __init__(self, ui, api_backend):
         self.ui = ui
         self.editor = None
 
@@ -265,8 +261,8 @@ class Controller(Observer):
         self.mode = self.INFO_MODE
 
         # API
-        oauth_token = self.configuration.oauth_token
-        oauth_token_secret = self.configuration.oauth_token_secret
+        oauth_token = configuration.oauth_token
+        oauth_token_secret = configuration.oauth_token_secret
         self.api = AsyncApi(api_backend,
                             access_token_key=oauth_token,
                             access_token_secret=oauth_token_secret,)
@@ -276,13 +272,13 @@ class Controller(Observer):
         Launch the main loop of the program.
         """
         # Creating the main loop for the first time
-        self.key_handler = KeyHandler(self.configuration, self)
+        self.key_handler = KeyHandler(self)
         handler = self.key_handler.handle
 
         # Authenticate API when the reactor starts running
         reactor.callWhenRunning(self.authenticate_api)
         self.loop = urwid.MainLoop(self.ui,
-                                   self.configuration.palette,
+                                   configuration.palette,
                                    handle_mouse=False,
                                    unhandled_input=handler,
                                    event_loop=urwid.TwistedEventLoop(reactor))
@@ -314,7 +310,7 @@ class Controller(Observer):
             pass
 
         # update alarm
-        seconds = self.configuration.update_frequency
+        seconds = configuration.update_frequency
         self.loop.set_alarm_in(seconds, self.update_alarm)
 
     def exit(self):
@@ -328,6 +324,8 @@ class Controller(Observer):
         From :class:`~turses.meta.Observer`, gets called when the observed
         subjects change.
         """
+        if self.is_in_info_mode():
+            self.timeline_mode()
         self.draw_timelines()
 
     # -- Callbacks ------------------------------------------------------------
@@ -339,7 +337,7 @@ class Controller(Observer):
     def update_alarm(self, *args, **kwargs):
         self.update_all_timelines()
 
-        seconds = self.configuration.update_frequency
+        seconds = configuration.update_frequency
         self.loop.set_alarm_in(seconds, self.update_alarm)
 
     # -- Modes ----------------------------------------------------------------
@@ -385,7 +383,7 @@ class Controller(Observer):
             return
 
         self.mode = self.HELP_MODE
-        self.ui.show_help(self.configuration)
+        self.ui.show_help()
         self.redraw_screen()
 
     def is_in_help_mode(self):
@@ -438,8 +436,8 @@ class Controller(Observer):
             OWN_TWEETS_TIMELINE,
         ]
 
-        default_timelines = self.configuration.default_timelines
-        is_any_default_timeline = any([default_timelines[timeline] for timeline
+        default_timelines = configuration.default_timelines
+        is_any_default_timeline = any([default_timelines[timeline] for timeline 
                                                                    in timelines])
 
         if is_any_default_timeline:
@@ -615,7 +613,7 @@ class Controller(Observer):
             self.ui.clear_header()
 
     def update_header(self):
-        template = self.configuration.styles['tab_template']
+        template = configuration.styles['tab_template']
         name_and_unread = [(tl.name, tl.unread_count) for tl in self.timelines]
 
         tabs = [template.format(timeline_name=name, unread=unread)
@@ -1202,7 +1200,7 @@ class Controller(Observer):
     # - Configuration ---------------------------------------------------------
 
     def reload_configuration(self):
-        self.configuration.reload()
+        configuration.reload()
         self.redraw_screen()
         self.info_message(_('Configuration reloaded'))
 
@@ -1220,8 +1218,7 @@ class Controller(Observer):
             self.info_message(_('No URLs found on this tweet'))
             return
 
-        args = ' '.join(urls)
-        self.open_urls_in_browser(args)
+        self.open_urls_in_browser(urls)
 
     @has_active_status
     def open_status_url(self):
@@ -1235,21 +1232,20 @@ class Controller(Observer):
             self.info_message(message)
             return
 
-        self.open_urls_in_browser(status.url)
+        self.open_urls_in_browser([status.url])
 
     def open_urls_in_browser(self, urls):
         """
         Open `urls` in $BROWSER if the environment variable is set.
         """
-        command = self.configuration.browser
-        if not command:
-            message = _('You have to set the BROWSER environment variable'
-                        ' to open URLs')
-            self.error_message(message)
-            return
-
+        # The webbrowser module respects the BROWSER environment variable,
+        # so if that's set, it'll use it, otherwise it will try to find
+        # something sensible
         try:
-            spawn_process(command, urls)
+            # Firefox, w3m, etc can't handle multiple URLs at command line, so
+            # split the URLs up for them
+            for url in urls:
+                webbrowser.open(url)
         except Exception, message:
             logging.exception(message)
             self.error_message(_('Unable to launch the browser'))

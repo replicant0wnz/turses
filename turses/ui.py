@@ -20,9 +20,215 @@ from urwid import (AttrMap, WidgetWrap, Padding, Divider, SolidFill,
 from turses import version
 from turses.config import (MOTION_KEY_BINDINGS, BUFFERS_KEY_BINDINGS,
                            TWEETS_KEY_BINDINGS, TIMELINES_KEY_BINDINGS,
-                           META_KEY_BINDINGS, TURSES_KEY_BINDINGS, )
-from turses.models import is_DM, TWEET_MAXIMUM_CHARACTERS, parse_attributes
-from turses.utils import encode
+                           META_KEY_BINDINGS, TURSES_KEY_BINDINGS,
+
+                           configuration)
+from turses.models import is_DM, TWEET_MAXIMUM_CHARACTERS
+from turses.utils import encode, is_hashtag, is_username, is_url
+
+
+# - Text parsing --------------------------------------------------------------
+
+def apply_attribute(string,
+                    hashtag='hashtag',
+                    attag='attag',
+                    url='url'):
+    """
+    Apply an attribute to `string` dependending on wether it is
+    a hashtag, a Twitter username or an URL.
+
+    >>> apply_attribute('#Python')
+    ('hashtag', u'#Python')
+    >>> apply_attribute('@dialelo')
+    ('attag', u'@dialelo')
+    >>> apply_attribute('@dialelo',
+                        attag='username')
+    ('username', u'@dialelo')
+    >>> apply_attribute('http://www.dialelo.com')
+    ('url', u'http://www.dialelo.com')
+    >>> apply_attribute('turses')
+    u'turses'
+    """
+    string = unicode(string)
+
+    if is_hashtag(string):
+        return (hashtag, string)
+    elif string.startswith('@') and is_username(string[1:]):
+        return (attag, string)
+    elif is_url(string):
+        return  (url, string)
+    else:
+        return string
+
+
+def parse_attributes(text,
+                     hashtag='hashtag',
+                     attag='attag',
+                     url='url'):
+    """
+    Parse the attributes in `text` and isolate the hashtags, usernames
+    and URLs with the provided attributes.
+
+    >>> text = 'I love #Python'
+    >>> parse_attributes(text=text,
+    ...                  hashtag='hashtag')
+    ['I love ', ('hashtag', '#Python')]
+    """
+
+    # nothing to do
+    if not text:
+        return u''
+
+    words = text.split()
+    parsed_text = [apply_attribute(word) for word in words]
+
+    def add_withespace(parsed_word):
+        if isinstance(parsed_word, tuple):
+            # is an (attr, word) tuple
+            return parsed_word
+        else:
+            return parsed_word + ' '
+
+    tweet = [add_withespace(parsed_word) for parsed_word
+                                         in parsed_text]
+
+    # insert spaces after an attribute
+    indices = []
+    for i, word in enumerate(tweet[:-1]):
+        word_is_attribute = isinstance(word, tuple)
+
+        if word_is_attribute:
+            indices.append(i + 1 + len(indices))
+
+    for index in indices:
+        tweet.insert(index, u' ')
+
+    # remove trailing withespace
+    if tweet and isinstance(tweet[-1], basestring):
+        tweet[-1] = tweet[-1][:-1]
+
+    return tweet
+
+def extract_attributes(entities, hashtag, attag, url):
+    """
+    Extract attributes from entities.
+
+    Return a list with (`attr`, string[, replacement]) tuples for each
+    entity in the status.
+    """
+    def map_attr(attr, entity_list):
+        """
+        Return a list with (`attr`, string) tuples for each string in
+        `entity_list`.
+        """
+        url_format = configuration.styles['url_format']
+        attributes = []
+        for entity in entity_list:
+            # urls are a special case, we change the URL shortened by
+            # Twitter (`http://t.co/*`) by the URL returned in
+            # `display_url`
+            indices = entity.get('indices')
+            is_url = entity.get('display_url', False)
+
+            if is_url:
+                # `display_url` is the default
+                url = entity.get('display_url')
+                if url_format == 'shortened':
+                    url = entity.get('url')
+                elif url_format == 'original' and 'expanded_url' in entity:
+                    url = entity.get('expanded_url')
+                mapping = (attr, indices, url)
+            else:
+                mapping = (attr, indices)
+            attributes.append(mapping)
+        return attributes
+
+    entity_names_and_attributes = [
+        ('user_mentions', attag),
+        ('hashtags', hashtag),
+        ('urls', url),
+        ('media', url),
+    ]
+
+    attributes = []
+    for entity_name, entity_attribute in entity_names_and_attributes:
+        entity_list = entities.get(entity_name, [])
+        attributes.extend(map_attr(entity_attribute, entity_list))
+
+    # sort mappings to split the text in order
+    attributes.sort(key=lambda mapping: mapping[1][0])
+
+    return attributes
+
+def map_attributes(status, hashtag, attag, url):
+    """
+    Return a list of strings and tuples for hashtag, attag and
+    url entities.
+
+    For a hashtag, its tuple would be (`hashtag`, text).
+
+    >>> from datetime import datetime
+    >>> s = Status(id=0,
+    ...            created_at=datetime.now(),
+    ...            user='dialelo',
+    ...            text='I love #Python',)
+    >>> map_attributes(s, 'hashtag', 'attag', 'url')
+    ['I love ', ('hashtag', '#Python')]
+    """
+    is_retweet = getattr(status, 'is_retweet', False)
+
+    if is_retweet:
+        # call this method on the retweeted status
+        return map_attributes(status.retweeted_status, hashtag, attag, url)
+
+    if not status.entities:
+        # no entities defined, parse text *manually*
+        #  - Favorites don't include any entities at the time of writing
+        text = status.retweeted_status.text if is_retweet else status.text
+        return parse_attributes(text, hashtag, attag, url)
+
+    # we have entities, extract the (attr, string[, replacement]) tuples
+    assert status.entities
+    attribute_mappings = extract_attributes(entities=status.entities,
+                                            hashtag=hashtag,
+                                            attag=attag,
+                                            url=url)
+
+    text = []
+    status_text = unicode(status.text)
+    # start from the beggining
+    index = 0
+    for mapping in attribute_mappings:
+        attribute = mapping[0]
+        starts, ends = mapping[1]
+
+        # this text has an attribute associated
+        entity_text = status_text[starts:ends]
+
+        if attribute == url and len(mapping) == 3:
+            ## if the text is a url and a third element is included in the
+            ## tuple; the third element is the original URL
+            entity_text = mapping[2]
+
+        # append normal text before the text with an attribute
+        normal_text = status_text[index:starts]
+        if normal_text:
+            text.append(normal_text)
+
+        # append text with attribute
+        text_with_attribute = (attribute, entity_text)
+        text.append(text_with_attribute)
+
+        # update index, continue from where the attribute text ends
+        index = ends
+
+    # after parsing all attributes we can have some text left
+    normal_text = status_text[index:]
+    if normal_text:
+        text.append(normal_text)
+
+    return text
+
 
 
 # - Main UI -------------------------------------------------------------------
@@ -35,16 +241,14 @@ class CursesInterface(WidgetWrap):
     all the components of the UI.
     """
 
-    def __init__(self,
-                 configuration):
-        self._configuration = configuration
+    def __init__(self):
         self._editor = None
 
         # header
         header = TabsWidget()
 
         # body
-        body = Banner(configuration)
+        body = Banner()
 
         # footer
         self._status_bar = configuration.styles.get('status_bar', False)
@@ -79,19 +283,18 @@ class CursesInterface(WidgetWrap):
     # -- Modes ----------------------------------------------------------------
 
     def draw_timelines(self, timelines):
-        self.frame.body = TimelinesBuffer(timelines,
-                                          configuration=self._configuration)
+        self.frame.body = TimelinesBuffer(timelines)
         self.frame.set_body(self.frame.body)
 
     def show_info(self):
         self.frame.header.clear()
-        self.frame.body = Banner(self._configuration)
+        self.frame.body = Banner()
         self.frame.set_body(self.frame.body)
 
-    def show_help(self, configuration):
+    def show_help(self):
         self.clear_header()
         self.status_info_message(_('type <esc> to leave the help page.'))
-        self.frame.body = HelpBuffer(configuration)
+        self.frame.body = HelpBuffer()
         self.frame.set_body(self.frame.body)
 
     # -- Header ---------------------------------------------------------------
@@ -174,7 +377,7 @@ class CursesInterface(WidgetWrap):
                                   done_signal_handler=done_signal_handler,
                                   **kwargs)
 
-        styles = self._configuration.styles
+        styles = configuration.styles
         horizontal_align = styles['editor_horizontal_align']
         vertical_align = styles['editor_vertical_align']
 
@@ -232,8 +435,7 @@ class CursesInterface(WidgetWrap):
     # - pop ups ---------------------------------------------------------------
 
     def show_user_info(self, user):
-        widget = UserInfo(user=user,
-                          configuration=self._configuration)
+        widget = UserInfo(user)
 
         self.show_widget_on_top(widget, width=40, height=18)
 
@@ -268,7 +470,7 @@ class CursesInterface(WidgetWrap):
 class Banner(WidgetWrap):
     """Displays information about the program."""
 
-    def __init__(self, configuration):
+    def __init__(self):
         self.text = []
 
         help_key = configuration.key_bindings['help'][0]
@@ -656,9 +858,7 @@ class HelpBuffer(ScrollableWidgetWrap):
 
     col = [30, 7]
 
-    def __init__(self, configuration):
-        self.configuration = configuration
-
+    def __init__(self):
         self.items = []
         self.create_help_buffer()
 
@@ -669,7 +869,7 @@ class HelpBuffer(ScrollableWidgetWrap):
 
     def _insert_bindings(self, bindings):
         for label in bindings:
-            values = self.configuration.key_bindings[label]
+            values = configuration.key_bindings[label]
             key, description = values[0], values[1]
             widgets = [
                 ('fixed', self.col[0], Text('  ' + label)),
@@ -790,24 +990,23 @@ class TimelineWidget(ScrollableListBox):
     which is rendered as a :class:`StatusWidget`.
     """
 
-    def __init__(self, timeline=None, configuration=None):
+    def __init__(self, timeline=None):
         statuses = timeline if timeline else []
-        status_widgets = [StatusWidget(status, configuration) for status
-                                                              in statuses]
+        status_widgets = [StatusWidget(status) for status in statuses]
         ScrollableListBox.__init__(self, status_widgets)
 
 
 class StatusWidget(WidgetWrap):
     """Widget containing a Twitter status."""
 
-    def __init__(self, status, configuration):
+    def __init__(self, status):
         self.status = status
-        self.configuration = configuration
 
         header_text = self._create_header(status)
-        text = status.map_attributes(hashtag='hashtag',
-                                     attag='attag',
-                                     url='url')
+        text = map_attributes(status,
+                              hashtag='hashtag',
+                              attag='attag',
+                              url='url')
 
         is_favorite = not is_DM(status) and status.is_favorite
         widget = self._build_widget(header_text, text, is_favorite)
@@ -816,10 +1015,9 @@ class StatusWidget(WidgetWrap):
 
     def _build_widget(self, header_text, text, favorite=False):
         """Return the wrapped widget."""
-        box_around_status = self.configuration.styles.get('box_around_status',
+        box_around_status = configuration.styles.get('box_around_status',
                                                           True)
-        divider = self.configuration.styles.get('status_divider',
-                                                False)
+        divider = configuration.styles.get('status_divider', False)
 
         header = AttrMap(Text(header_text), 'header')
         body = Padding(AttrMap(Text(text), 'body'), left=1, right=1)
@@ -838,7 +1036,7 @@ class StatusWidget(WidgetWrap):
             # use a divider
             # we focus the divider to change colors when this
             # widget is focused
-            styles = self.configuration.styles
+            styles = configuration.styles
             status_divider = styles.get('status_divider_char', '·')
 
             divider = AttrMap(Divider(status_divider),
@@ -883,7 +1081,7 @@ class StatusWidget(WidgetWrap):
             retweet_count = str(status.retweet_count)
 
         # create header
-        styles = self.configuration.styles
+        styles = configuration.styles
         header_template = ' ' + styles.get('header_template') + ' '
         header = unicode(header_template).format(
             username=username,
@@ -897,7 +1095,7 @@ class StatusWidget(WidgetWrap):
         return encode(header)
 
     def _dm_header(self, dm):
-        dm_template = ' ' + self.configuration.styles['dm_template'] + ' '
+        dm_template = ''.join([' ', configuration.styles['dm_template'], ' '])
         relative_created_at = dm.relative_created_at
         header = unicode(dm_template).format(
             sender_screen_name=dm.sender_screen_name,
@@ -973,7 +1171,7 @@ class UserInfo(WidgetWrap):
     __metaclass__ = signals.MetaSignals
     signals = ['done']
 
-    def __init__(self, user, configuration):
+    def __init__(self, user):
         """
         """
         whitespace = Divider(' ')
@@ -1005,7 +1203,7 @@ class UserInfo(WidgetWrap):
 
         # last status
         if user.status:
-            status = StatusWidget(user.status, configuration)
+            status = StatusWidget(user.status)
             widgets.append(status)
 
         pile = Pile(widgets)
