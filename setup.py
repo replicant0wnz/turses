@@ -14,6 +14,7 @@ REQUIREMENTS = [
     "oauth2",
     "urwid",
     "tweepy",
+    "twisted",
 ]
 TEST_REQUIREMENTS = list(REQUIREMENTS)
 TEST_REQUIREMENTS.extend(["mock", "nose", "coverage"])
