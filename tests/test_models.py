@@ -2,6 +2,7 @@
 
 from sys import path
 path.append('../')
+from sys import version_info
 import unittest
 from datetime import datetime
 
@@ -481,7 +482,8 @@ class TimelineListTest(ActiveListTest):
         self.assertEqual(timeline, active_timeline)
 
     def test_active_returns_None_when_empty(self):
-        self.assertIsNone(self.timeline_list.active)
+        if version_info > (2, 7):
+            self.assertIsNone(self.timeline_list.active)
 
     def test_append_timeline_increases_timeline_size(self):
         self.assertEqual(len(self.timeline_list), 0)
